@@ -1,0 +1,28 @@
+pid_goal_controller:
+  ros__parameters:
+    kp_x: 1.0
+    ki_x: 0.0
+    kd_x: 0.05
+
+    kp_y: 1.0
+    ki_y: 0.0
+    kd_y: 0.05
+
+    kp_yaw: 2.0
+    ki_yaw: 0.0
+    kd_yaw: 0.08
+
+    max_v: 0.4
+    max_w: 1.0
+
+    pos_tolerance: 0.03
+    yaw_tolerance: 0.05
+
+    control_frequency: 30.0
+    odom_timeout: 0.5
+
+    goal_topic: goal_pose
+    odom_topic: odom
+    cmd_vel_topic: cmd_vel
+    error_topic: pid_error
+    distance_topic: pid_distance

@@ -1,29 +1,44 @@
 # interactive_goal_marker
 
-`interactive_goal_marker` is a reusable ROS 2 C++ package that publishes a goal pose from an RViz2 Interactive Marker.
+`interactive_goal_marker` 在 RViz2 中创建 Interactive Marker，用于输入机器人目标位姿。
 
-## Interface
+## 功能说明
 
-Input:
+- 在 RViz2 中创建 Interactive Marker。
+- 支持平面拖动目标位置。
+- 支持旋转目标航向。
+- 用户完成操作并释放鼠标后发布目标位姿。
+- 只负责目标输入，不负责 PID 控制，也不发布 `cmd_vel`。
 
-- RViz2 Interactive Marker interaction.
+## 接口
 
-Output:
+| 类型 | 名称 | 消息类型 | 说明 |
+|---|---|---|---|
+| 发布话题 | `goal_pose` | `geometry_msgs/msg/PoseStamped` | 目标位置与目标航向 |
 
-- `geometry_msgs/msg/PoseStamped`
-- Default topic: `goal_pose`
+## 参数
 
-This node does not compute control commands and does not publish `cmd_vel`.
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `frame_id` | `odom` | Interactive Marker 和发布目标位姿使用的坐标系 |
+| `server_name` | `goal_marker` | Interactive Marker Server 名称 |
+| `goal_topic` | `goal_pose` | 发布目标位姿的 Topic |
+| `use_sim_time` | `false` | 是否使用仿真时间 |
 
-## Parameters
-
-- `frame_id` (`string`, default: `odom`): frame used for the marker and published goal.
-- `server_name` (`string`, default: `goal_marker`): Interactive Marker Server name.
-- `goal_topic` (`string`, default: `goal_pose`): topic used to publish goal poses.
-- `use_sim_time` (`bool`, default: `false`): use simulation time.
-
-## Run
+## 启动命令
 
 ```bash
 ros2 launch interactive_goal_marker interactive_goal_marker.launch.py
 ```
+
+## RViz2 配置
+
+1. 打开 RViz2。
+2. 将 `Fixed Frame` 设置为 `odom`，或设置为启动参数 `frame_id` 对应的坐标系。
+3. 点击 `Add`。
+4. 添加 `InteractiveMarkers` 显示项。
+5. 将 `Update Topic` 设置为或选择 `/goal_marker/update`。
+6. 拖动标记调整目标位置，使用旋转控件调整目标朝向。
+7. 释放鼠标后，节点向 `goal_pose` 发布 `PoseStamped`。
+
+`/goal_marker/update` 来源于默认的 `server_name=goal_marker`；修改 `server_name` 后，对应的更新话题也会变化。

@@ -4,15 +4,21 @@
 #include <chrono>
 #include <cmath>
 #include <functional>
+#include <mutex>
+
+#include "tf2/exceptions.h"
+#include "tf2/time.h"
+#include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
 
 namespace pid_goal_controller {
 namespace {
 
 constexpr char kDefaultGoalTopic[] = "goal_pose";
-constexpr char kDefaultOdomTopic[] = "odom";
+constexpr char kDefaultBaseFrame[] = "base_footprint";
 constexpr char kDefaultCmdVelTopic[] = "cmd_vel";
 constexpr char kDefaultErrorTopic[] = "pid_error";
 constexpr char kDefaultDistanceTopic[] = "pid_distance";
+
 constexpr double kMaxControlDt = 0.2;
 constexpr double kMaxIntegral = 0.5;
 
@@ -24,15 +30,19 @@ double WrapAngle(double angle) {
   while (angle > M_PI) {
     angle -= 2.0 * M_PI;
   }
+
   while (angle < -M_PI) {
     angle += 2.0 * M_PI;
   }
+
   return angle;
 }
 
 double YawFromQuaternion(const geometry_msgs::msg::Quaternion& q) {
   const double siny_cosp = 2.0 * (q.w * q.z + q.x * q.y);
+
   const double cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z);
+
   return std::atan2(siny_cosp, cosy_cosp);
 }
 
@@ -42,25 +52,22 @@ PidGoalController::PidGoalController() : Node("pid_goal_controller") {
   declare_parameter<double>("kp_x", 1.0);
   declare_parameter<double>("ki_x", 0.0);
   declare_parameter<double>("kd_x", 0.05);
-
   declare_parameter<double>("kp_y", 1.0);
   declare_parameter<double>("ki_y", 0.0);
   declare_parameter<double>("kd_y", 0.05);
-
   declare_parameter<double>("kp_yaw", 2.0);
   declare_parameter<double>("ki_yaw", 0.0);
   declare_parameter<double>("kd_yaw", 0.08);
-
   declare_parameter<double>("max_v", 0.4);
   declare_parameter<double>("max_w", 1.0);
-
   declare_parameter<double>("pos_tolerance", 0.03);
   declare_parameter<double>("yaw_tolerance", 0.05);
   declare_parameter<double>("control_frequency", 30.0);
-  declare_parameter<double>("odom_timeout", 0.5);
+  declare_parameter<double>("transform_timeout", 0.1);
+  declare_parameter<bool>("publish_debug", true);
 
   declare_parameter<std::string>("goal_topic", kDefaultGoalTopic);
-  declare_parameter<std::string>("odom_topic", kDefaultOdomTopic);
+  declare_parameter<std::string>("base_frame", kDefaultBaseFrame);
   declare_parameter<std::string>("cmd_vel_topic", kDefaultCmdVelTopic);
   declare_parameter<std::string>("error_topic", kDefaultErrorTopic);
   declare_parameter<std::string>("distance_topic", kDefaultDistanceTopic);
@@ -70,19 +77,25 @@ PidGoalController::PidGoalController() : Node("pid_goal_controller") {
   pos_tolerance_ = std::fabs(get_parameter("pos_tolerance").as_double());
   yaw_tolerance_ = std::fabs(get_parameter("yaw_tolerance").as_double());
   control_frequency_ = get_parameter("control_frequency").as_double();
-  odom_timeout_ = get_parameter("odom_timeout").as_double();
+  transform_timeout_ = get_parameter("transform_timeout").as_double();
+  publish_debug_ = get_parameter("publish_debug").as_bool();
 
   if (control_frequency_ <= 0.0) {
-    RCLCPP_WARN(get_logger(), "control_frequency must be positive. Falling back to 30 Hz.");
+    RCLCPP_WARN(get_logger(),
+                "control_frequency must be positive. "
+                "Falling back to 30 Hz.");
     control_frequency_ = 30.0;
   }
-  if (odom_timeout_ <= 0.0) {
-    RCLCPP_WARN(get_logger(), "odom_timeout must be positive. Falling back to 0.5 s.");
-    odom_timeout_ = 0.5;
+
+  if (transform_timeout_ <= 0.0) {
+    RCLCPP_WARN(get_logger(),
+                "transform_timeout must be positive. "
+                "Falling back to 0.1 s.");
+    transform_timeout_ = 0.1;
   }
 
   goal_topic_ = get_parameter("goal_topic").as_string();
-  odom_topic_ = get_parameter("odom_topic").as_string();
+  base_frame_ = get_parameter("base_frame").as_string();
   cmd_vel_topic_ = get_parameter("cmd_vel_topic").as_string();
   error_topic_ = get_parameter("error_topic").as_string();
   distance_topic_ = get_parameter("distance_topic").as_string();
@@ -94,53 +107,59 @@ PidGoalController::PidGoalController() : Node("pid_goal_controller") {
   pid_yaw_ = Pid(get_parameter("kp_yaw").as_double(), get_parameter("ki_yaw").as_double(),
                  get_parameter("kd_yaw").as_double(), max_w_, kMaxIntegral);
 
+  tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
+  tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+
   cmd_pub_ = create_publisher<geometry_msgs::msg::Twist>(cmd_vel_topic_, 10);
   error_pub_ = create_publisher<geometry_msgs::msg::TwistStamped>(error_topic_, 10);
   distance_pub_ = create_publisher<std_msgs::msg::Float64>(distance_topic_, 10);
-
-  odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
-      odom_topic_, 10, std::bind(&PidGoalController::OdomCallback, this, std::placeholders::_1));
   goal_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
-      goal_topic_, 10, std::bind(&PidGoalController::GoalCallback, this, std::placeholders::_1));
+      goal_topic_, 1, std::bind(&PidGoalController::GoalCallback, this, std::placeholders::_1));
 
-  last_time_ = now();
-  last_odom_wall_time_ = std::chrono::steady_clock::now();
+  last_time_ = std::chrono::steady_clock::now();
 
   const auto timer_period = std::chrono::duration_cast<std::chrono::nanoseconds>(
       std::chrono::duration<double>(1.0 / control_frequency_));
+
   timer_ = create_wall_timer(timer_period, std::bind(&PidGoalController::ControlLoop, this));
 
   RCLCPP_INFO(get_logger(), "pid_goal_controller started.");
-  RCLCPP_INFO(get_logger(), "goal_topic=%s odom_topic=%s cmd_vel_topic=%s", goal_topic_.c_str(),
-              odom_topic_.c_str(), cmd_vel_topic_.c_str());
+  RCLCPP_INFO(get_logger(), "goal_topic=%s base_frame=%s cmd_vel_topic=%s", goal_topic_.c_str(),
+              base_frame_.c_str(), cmd_vel_topic_.c_str());
   RCLCPP_INFO(get_logger(), "error_topic=%s distance_topic=%s", error_topic_.c_str(),
               distance_topic_.c_str());
 }
-
-void PidGoalController::OdomCallback(const nav_msgs::msg::Odometry::SharedPtr msg) {
-  x_ = msg->pose.pose.position.x;
-  y_ = msg->pose.pose.position.y;
-  yaw_ = YawFromQuaternion(msg->pose.pose.orientation);
-
-  last_odom_wall_time_ = std::chrono::steady_clock::now();
-  have_odom_ = true;
-}
-
 void PidGoalController::GoalCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
-  goal_x_ = msg->pose.position.x;
-  goal_y_ = msg->pose.position.y;
-  goal_yaw_ = YawFromQuaternion(msg->pose.orientation);
+  if (msg->header.frame_id.empty()) {
+    RCLCPP_WARN(get_logger(), "Received goal with empty frame_id. Ignoring it.");
+    return;
+  }
 
-  have_goal_ = true;
-  last_time_ = now();
-  ResetPid();
+  bool first_goal = false;
 
-  RCLCPP_INFO(get_logger(), "New goal: x=%.3f, y=%.3f, yaw=%.3f", goal_x_, goal_y_, goal_yaw_);
+  {
+    std::lock_guard<std::mutex> lock(mtx_);
+
+    first_goal = !have_goal_;
+    goal_pose_ = *msg;
+    have_goal_ = true;
+
+    if (first_goal) {
+      ResetPid();
+      last_time_ = std::chrono::steady_clock::now();
+    }
+  }
+
+  if (first_goal) {
+    RCLCPP_INFO(get_logger(), "Received first goal in frame '%s'.", msg->header.frame_id.c_str());
+  }
 }
 
 void PidGoalController::PublishDebug(double error_x_body, double error_y_body, double error_yaw,
                                      double distance) {
   geometry_msgs::msg::TwistStamped error_msg;
+
+  error_msg.header.frame_id = base_frame_;
   error_msg.header.stamp = now();
   error_msg.twist.linear.x = error_x_body;
   error_msg.twist.linear.y = error_y_body;
@@ -154,6 +173,13 @@ void PidGoalController::PublishDebug(double error_x_body, double error_y_body, d
 
 void PidGoalController::PublishStop() {
   geometry_msgs::msg::Twist cmd;
+
+  cmd.linear.x = 0.0;
+  cmd.linear.y = 0.0;
+  cmd.linear.z = 0.0;
+  cmd.angular.x = 0.0;
+  cmd.angular.y = 0.0;
+  cmd.angular.z = 0.0;
   cmd_pub_->publish(cmd);
 }
 
@@ -164,83 +190,122 @@ void PidGoalController::ResetPid() {
 }
 
 void PidGoalController::ControlLoop() {
-  if (!have_goal_) {
-    return;
-  }
+  geometry_msgs::msg::PoseStamped goal_pose;
+  double dt = 0.0;
 
-  if (!have_odom_) {
-    PublishStop();
-    return;
-  }
+  /*
+   * 锁内只复制目标和更新时间。
+   * TF查询可能等待，不能拿着锁查询TF，
+   * 否则会阻塞GoalCallback更新最新目标。
+   */
+  {
+    std::lock_guard<std::mutex> lock(mtx_);
 
-  const auto now_wall_time = std::chrono::steady_clock::now();
-  const double odom_age =
-      std::chrono::duration<double>(now_wall_time - last_odom_wall_time_).count();
-  if (odom_age > odom_timeout_) {
-    PublishStop();
-    ResetPid();
-    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
-                         "No odom received for %.3f s. Publishing zero cmd_vel.", odom_age);
-    return;
-  }
+    if (!have_goal_) {
+      return;
+    }
 
-  const rclcpp::Time now_time = now();
-  double dt = (now_time - last_time_).seconds();
-  last_time_ = now_time;
+    goal_pose = goal_pose_;
+    const auto current_time = std::chrono::steady_clock::now();
+    dt = std::chrono::duration<double>(current_time - last_time_).count();
+    last_time_ = current_time;
+  }
 
   if (dt <= 0.0) {
     return;
   }
 
+  bool reset_pid = false;
+
   if (dt > kMaxControlDt) {
-    ResetPid();
     dt = kMaxControlDt;
+    reset_pid = true;
   }
 
-  const double error_x_world = goal_x_ - x_;
-  const double error_y_world = goal_y_ - y_;
-  const double error_yaw = WrapAngle(goal_yaw_ - yaw_);
-  const double distance = std::hypot(error_x_world, error_y_world);
+  geometry_msgs::msg::PoseStamped goal_in_base;
 
-  const double cos_yaw = std::cos(yaw_);
-  const double sin_yaw = std::sin(yaw_);
-  const double error_x_body = cos_yaw * error_x_world + sin_yaw * error_y_world;
-  const double error_y_body = -sin_yaw * error_x_world + cos_yaw * error_y_world;
+  try {
+    const geometry_msgs::msg::TransformStamped transform =
+        tf_buffer_->lookupTransform(base_frame_, goal_pose.header.frame_id, tf2::TimePointZero,
+                                    tf2::durationFromSec(transform_timeout_));
 
-  PublishDebug(error_x_body, error_y_body, error_yaw, distance);
+    tf2::doTransform(goal_pose, goal_in_base, transform);
+  } catch (const tf2::TransformException& ex) {
+    {
+      std::lock_guard<std::mutex> lock(mtx_);
+      ResetPid();
+    }
+
+    PublishStop();
+
+    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
+                         "Failed to transform goal from '%s' to '%s': %s",
+                         goal_pose.header.frame_id.c_str(), base_frame_.c_str(), ex.what());
+
+    return;
+  }
+
+  /*
+   * 目标已经转换到base_frame_。
+   *
+   * x：目标在机器人前后方向上的误差
+   * y：目标在机器人左右方向上的误差
+   * yaw：目标朝向相对机器人朝向的误差
+   */
+  const double error_x_body = goal_in_base.pose.position.x;
+  const double error_y_body = goal_in_base.pose.position.y;
+  const double error_yaw = WrapAngle(YawFromQuaternion(goal_in_base.pose.orientation));
+  const double distance = std::hypot(error_x_body, error_y_body);
+
+  if (publish_debug_) {
+    PublishDebug(error_x_body, error_y_body, error_yaw, distance);
+  }
 
   if (distance <= pos_tolerance_ && std::fabs(error_yaw) <= yaw_tolerance_) {
+    {
+      std::lock_guard<std::mutex> lock(mtx_);
+      ResetPid();
+    }
+
     PublishStop();
-    have_goal_ = false;
-    ResetPid();
-    RCLCPP_INFO(get_logger(), "Goal reached.");
     return;
   }
 
   geometry_msgs::msg::Twist cmd;
 
-  if (distance > pos_tolerance_) {
-    double vx = pid_x_.Update(error_x_body, dt);
-    double vy = pid_y_.Update(error_y_body, dt);
+  {
+    std::lock_guard<std::mutex> lock(mtx_);
 
-    const double v_norm = std::hypot(vx, vy);
-    if (v_norm > max_v_ && v_norm > 0.0) {
-      const double scale = max_v_ / v_norm;
-      vx *= scale;
-      vy *= scale;
+    if (reset_pid) {
+      ResetPid();
     }
 
-    cmd.linear.x = vx;
-    cmd.linear.y = vy;
-  } else {
-    pid_x_.Reset();
-    pid_y_.Reset();
-  }
+    if (distance > pos_tolerance_) {
+      double vx = pid_x_.Update(error_x_body, dt);
+      double vy = pid_y_.Update(error_y_body, dt);
+      const double v_norm = std::hypot(vx, vy);
 
-  if (std::fabs(error_yaw) > yaw_tolerance_) {
-    cmd.angular.z = ClampValue(pid_yaw_.Update(error_yaw, dt), -max_w_, max_w_);
-  } else {
-    pid_yaw_.Reset();
+      if (v_norm > max_v_ && v_norm > 0.0) {
+        const double scale = max_v_ / v_norm;
+        vx *= scale;
+        vy *= scale;
+      }
+
+      cmd.linear.x = vx;
+      cmd.linear.y = vy;
+    } else {
+      pid_x_.Reset();
+      pid_y_.Reset();
+      cmd.linear.x = 0.0;
+      cmd.linear.y = 0.0;
+    }
+
+    if (std::fabs(error_yaw) > yaw_tolerance_) {
+      cmd.angular.z = ClampValue(pid_yaw_.Update(error_yaw, dt), -max_w_, max_w_);
+    } else {
+      pid_yaw_.Reset();
+      cmd.angular.z = 0.0;
+    }
   }
 
   cmd_pub_->publish(cmd);

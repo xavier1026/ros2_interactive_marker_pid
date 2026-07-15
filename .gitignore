@@ -8,7 +8,7 @@ log/
 .idea/
 
 # Python cache
-__pycache__/
+**pycache**/
 *.pyc
 
 # Temporary files

@@ -10,6 +10,9 @@ find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
+find_package(tf2_ros REQUIRED)
 
 add_executable(pid_goal_controller
   src/pid.cpp
@@ -27,6 +30,9 @@ ament_target_dependencies(pid_goal_controller
   nav_msgs
   rclcpp
   std_msgs
+  tf2_geometry_msgs
+  tf2_ros
+  tf2
 )
 
 install(TARGETS pid_goal_controller

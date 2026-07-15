@@ -19,10 +19,11 @@ pid_goal_controller:
     yaw_tolerance: 0.05
 
     control_frequency: 30.0
-    odom_timeout: 0.5
+    transform_timeout: 0.1
+    publish_debug: true
 
     goal_topic: goal_pose
-    odom_topic: odom
+    base_frame: base_footprint
     cmd_vel_topic: cmd_vel
     error_topic: pid_error
     distance_topic: pid_distance

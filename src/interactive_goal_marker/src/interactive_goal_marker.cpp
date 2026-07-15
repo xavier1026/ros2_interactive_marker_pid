@@ -48,7 +48,7 @@ InteractiveGoalMarker::InteractiveGoalMarker() : Node("interactive_goal_marker")
 
   RCLCPP_INFO(get_logger(), "interactive_goal_marker started.");
   RCLCPP_INFO(get_logger(), "RViz namespace: %s", server_name_.c_str());
-  RCLCPP_INFO(get_logger(), "Drag the marker in RViz. Release mouse to publish %s.",
+  RCLCPP_INFO(get_logger(), "Drag the marker in RViz to continuously update %s.",
               goal_topic_.c_str());
   RCLCPP_INFO(get_logger(), "This node only publishes %s. It does not publish cmd_vel.",
               goal_topic_.c_str());
@@ -219,9 +219,7 @@ void InteractiveGoalMarker::ProcessFeedback(
   server_->setPose(feedback->marker_name, pose);
   server_->applyChanges();
 
-  if (feedback->event_type == visualization_msgs::msg::InteractiveMarkerFeedback::MOUSE_UP) {
-    PublishGoal(pose);
-  }
+  PublishGoal(pose);
 }
 
 }  // namespace interactive_goal_marker

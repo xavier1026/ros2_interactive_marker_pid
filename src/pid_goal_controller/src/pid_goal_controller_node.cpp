@@ -5,7 +5,12 @@
 
 int main(int argc, char** argv) {
   rclcpp::init(argc, argv);
-  rclcpp::spin(std::make_shared<pid_goal_controller::PidGoalController>());
+
+  {
+    const auto node = std::make_shared<pid_goal_controller::PidGoalController>();
+    rclcpp::spin(node);
+  }
+
   rclcpp::shutdown();
   return 0;
 }

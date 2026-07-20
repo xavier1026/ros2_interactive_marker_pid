@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -19,11 +20,13 @@ namespace pid_goal_controller {
 class PidGoalController : public rclcpp::Node {
  public:
   PidGoalController();
+  ~PidGoalController() noexcept override;
 
  private:
   void GoalCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
   void PublishDebug(double error_x_body, double error_y_body, double error_yaw, double distance);
   void PublishStop();
+  void RejectGoal();
   void ResetPid();
   void ControlLoop();
 
@@ -48,15 +51,17 @@ class PidGoalController : public rclcpp::Node {
   bool publish_debug_{true};
 
   geometry_msgs::msg::PoseStamped goal_pose_;
+  std::uint64_t goal_generation_{0};
 
-  double max_v_{0.4};
-  double max_w_{1.0};
-  double pos_tolerance_{0.03};
-  double yaw_tolerance_{0.05};
+  double max_v_{0.10};
+  double max_w_{0.15};
+  double pos_tolerance_{0.10};
+  double yaw_tolerance_{0.10};
   double control_frequency_{30.0};
   double transform_timeout_{0.1};
 
   std::string goal_topic_;
+  std::string global_frame_;
   std::string base_frame_;
   std::string cmd_vel_topic_;
   std::string error_topic_;

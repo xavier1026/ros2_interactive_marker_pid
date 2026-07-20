@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <exception>
 #include <functional>
 #include <mutex>
 
@@ -13,11 +14,17 @@
 namespace pid_goal_controller {
 namespace {
 
-constexpr char kDefaultGoalTopic[] = "goal_pose";
-constexpr char kDefaultBaseFrame[] = "base_footprint";
-constexpr char kDefaultCmdVelTopic[] = "cmd_vel";
-constexpr char kDefaultErrorTopic[] = "pid_error";
-constexpr char kDefaultDistanceTopic[] = "pid_distance";
+constexpr char kDefaultGoalTopic[] = "/goal_pose";
+constexpr char kDefaultGlobalFrame[] = "map";
+constexpr char kDefaultBaseFrame[] = "base_link";
+constexpr char kDefaultCmdVelTopic[] = "/cmd_vel";
+constexpr char kDefaultErrorTopic[] = "/pid_error";
+constexpr char kDefaultDistanceTopic[] = "/pid_distance";
+
+constexpr double kDefaultMaxV = 0.10;
+constexpr double kDefaultMaxW = 0.15;
+constexpr double kDefaultPosTolerance = 0.10;
+constexpr double kDefaultYawTolerance = 0.10;
 
 constexpr double kMaxControlDt = 0.2;
 constexpr double kMaxIntegral = 0.5;
@@ -58,15 +65,16 @@ PidGoalController::PidGoalController() : Node("pid_goal_controller") {
   declare_parameter<double>("kp_yaw", 2.0);
   declare_parameter<double>("ki_yaw", 0.0);
   declare_parameter<double>("kd_yaw", 0.08);
-  declare_parameter<double>("max_v", 0.4);
-  declare_parameter<double>("max_w", 1.0);
-  declare_parameter<double>("pos_tolerance", 0.03);
-  declare_parameter<double>("yaw_tolerance", 0.05);
+  declare_parameter<double>("max_v", kDefaultMaxV);
+  declare_parameter<double>("max_w", kDefaultMaxW);
+  declare_parameter<double>("pos_tolerance", kDefaultPosTolerance);
+  declare_parameter<double>("yaw_tolerance", kDefaultYawTolerance);
   declare_parameter<double>("control_frequency", 30.0);
   declare_parameter<double>("transform_timeout", 0.1);
   declare_parameter<bool>("publish_debug", true);
 
   declare_parameter<std::string>("goal_topic", kDefaultGoalTopic);
+  declare_parameter<std::string>("global_frame", kDefaultGlobalFrame);
   declare_parameter<std::string>("base_frame", kDefaultBaseFrame);
   declare_parameter<std::string>("cmd_vel_topic", kDefaultCmdVelTopic);
   declare_parameter<std::string>("error_topic", kDefaultErrorTopic);
@@ -95,6 +103,7 @@ PidGoalController::PidGoalController() : Node("pid_goal_controller") {
   }
 
   goal_topic_ = get_parameter("goal_topic").as_string();
+  global_frame_ = get_parameter("global_frame").as_string();
   base_frame_ = get_parameter("base_frame").as_string();
   cmd_vel_topic_ = get_parameter("cmd_vel_topic").as_string();
   error_topic_ = get_parameter("error_topic").as_string();
@@ -124,35 +133,64 @@ PidGoalController::PidGoalController() : Node("pid_goal_controller") {
   timer_ = create_wall_timer(timer_period, std::bind(&PidGoalController::ControlLoop, this));
 
   RCLCPP_INFO(get_logger(), "pid_goal_controller started.");
-  RCLCPP_INFO(get_logger(), "goal_topic=%s base_frame=%s cmd_vel_topic=%s", goal_topic_.c_str(),
-              base_frame_.c_str(), cmd_vel_topic_.c_str());
+  RCLCPP_INFO(get_logger(), "goal_topic=%s global_frame=%s base_frame=%s cmd_vel_topic=%s",
+              goal_topic_.c_str(), global_frame_.c_str(), base_frame_.c_str(),
+              cmd_vel_topic_.c_str());
   RCLCPP_INFO(get_logger(), "error_topic=%s distance_topic=%s", error_topic_.c_str(),
               distance_topic_.c_str());
 }
+
+PidGoalController::~PidGoalController() noexcept {
+  try {
+    if (cmd_pub_) {
+      PublishStop();
+    }
+  } catch (const std::exception& ex) {
+    RCLCPP_ERROR(get_logger(), "Failed to publish zero Twist while shutting down: %s", ex.what());
+  } catch (...) {
+    RCLCPP_ERROR(get_logger(), "Failed to publish zero Twist while shutting down.");
+  }
+}
+
 void PidGoalController::GoalCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
   if (msg->header.frame_id.empty()) {
-    RCLCPP_WARN(get_logger(), "Received goal with empty frame_id. Ignoring it.");
+    RejectGoal();
+    RCLCPP_WARN(get_logger(),
+                "Received goal with empty frame_id. Rejecting it and publishing zero Twist.");
     return;
   }
 
-  bool first_goal = false;
+  geometry_msgs::msg::PoseStamped goal_in_global;
+
+  if (msg->header.frame_id == global_frame_) {
+    goal_in_global = *msg;
+  } else {
+    try {
+      // Buffer::transform uses the PoseStamped timestamp (or the latest TF for a zero stamp).
+      tf_buffer_->transform(*msg, goal_in_global, global_frame_,
+                            tf2::durationFromSec(transform_timeout_));
+    } catch (const tf2::TransformException& ex) {
+      RejectGoal();
+      RCLCPP_WARN(get_logger(),
+                  "Failed to transform goal from '%s' to '%s': %s. "
+                  "Rejecting it and publishing zero Twist.",
+                  msg->header.frame_id.c_str(), global_frame_.c_str(), ex.what());
+      return;
+    }
+  }
 
   {
     std::lock_guard<std::mutex> lock(mtx_);
 
-    first_goal = !have_goal_;
-    goal_pose_ = *msg;
+    goal_pose_ = goal_in_global;
     have_goal_ = true;
-
-    if (first_goal) {
-      ResetPid();
-      last_time_ = std::chrono::steady_clock::now();
-    }
+    ++goal_generation_;
+    ResetPid();
+    last_time_ = std::chrono::steady_clock::now();
   }
 
-  if (first_goal) {
-    RCLCPP_INFO(get_logger(), "Received first goal in frame '%s'.", msg->header.frame_id.c_str());
-  }
+  RCLCPP_INFO(get_logger(), "Accepted goal in '%s' (received in '%s').", global_frame_.c_str(),
+              msg->header.frame_id.c_str());
 }
 
 void PidGoalController::PublishDebug(double error_x_body, double error_y_body, double error_yaw,
@@ -183,6 +221,17 @@ void PidGoalController::PublishStop() {
   cmd_pub_->publish(cmd);
 }
 
+void PidGoalController::RejectGoal() {
+  {
+    std::lock_guard<std::mutex> lock(mtx_);
+    have_goal_ = false;
+    ++goal_generation_;
+    ResetPid();
+  }
+
+  PublishStop();
+}
+
 void PidGoalController::ResetPid() {
   pid_x_.Reset();
   pid_y_.Reset();
@@ -191,6 +240,7 @@ void PidGoalController::ResetPid() {
 
 void PidGoalController::ControlLoop() {
   geometry_msgs::msg::PoseStamped goal_pose;
+  std::uint64_t goal_generation = 0;
   double dt = 0.0;
 
   /*
@@ -206,6 +256,7 @@ void PidGoalController::ControlLoop() {
     }
 
     goal_pose = goal_pose_;
+    goal_generation = goal_generation_;
     const auto current_time = std::chrono::steady_clock::now();
     dt = std::chrono::duration<double>(current_time - last_time_).count();
     last_time_ = current_time;
@@ -222,14 +273,12 @@ void PidGoalController::ControlLoop() {
     reset_pid = true;
   }
 
-  geometry_msgs::msg::PoseStamped goal_in_base;
+  geometry_msgs::msg::TransformStamped robot_in_global;
 
   try {
-    const geometry_msgs::msg::TransformStamped transform =
-        tf_buffer_->lookupTransform(base_frame_, goal_pose.header.frame_id, tf2::TimePointZero,
-                                    tf2::durationFromSec(transform_timeout_));
-
-    tf2::doTransform(goal_pose, goal_in_base, transform);
+    // lookupTransform(target, source, ...) returns the source frame pose in the target frame.
+    robot_in_global = tf_buffer_->lookupTransform(global_frame_, base_frame_, tf2::TimePointZero,
+                                                  tf2::durationFromSec(transform_timeout_));
   } catch (const tf2::TransformException& ex) {
     {
       std::lock_guard<std::mutex> lock(mtx_);
@@ -239,23 +288,32 @@ void PidGoalController::ControlLoop() {
     PublishStop();
 
     RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
-                         "Failed to transform goal from '%s' to '%s': %s",
-                         goal_pose.header.frame_id.c_str(), base_frame_.c_str(), ex.what());
+                         "Required TF '%s' -> '%s' is unavailable: %s. "
+                         "Publishing zero Twist.",
+                         global_frame_.c_str(), base_frame_.c_str(), ex.what());
 
     return;
   }
 
   /*
-   * 目标已经转换到base_frame_。
-   *
-   * x：目标在机器人前后方向上的误差
-   * y：目标在机器人左右方向上的误差
-   * yaw：目标朝向相对机器人朝向的误差
+   * goal_pose_ is always expressed in global_frame_. The transform gives the
+   * current base_frame_ pose in that same global frame. Compute the world-frame
+   * error first, then rotate it into the robot body frame for velocity control.
    */
-  const double error_x_body = goal_in_base.pose.position.x;
-  const double error_y_body = goal_in_base.pose.position.y;
-  const double error_yaw = WrapAngle(YawFromQuaternion(goal_in_base.pose.orientation));
-  const double distance = std::hypot(error_x_body, error_y_body);
+  const double robot_x = robot_in_global.transform.translation.x;
+  const double robot_y = robot_in_global.transform.translation.y;
+  const double robot_yaw = YawFromQuaternion(robot_in_global.transform.rotation);
+  const double goal_yaw = YawFromQuaternion(goal_pose.pose.orientation);
+
+  const double error_x_world = goal_pose.pose.position.x - robot_x;
+  const double error_y_world = goal_pose.pose.position.y - robot_y;
+  const double error_yaw = WrapAngle(goal_yaw - robot_yaw);
+
+  const double cos_yaw = std::cos(robot_yaw);
+  const double sin_yaw = std::sin(robot_yaw);
+  const double error_x_body = cos_yaw * error_x_world + sin_yaw * error_y_world;
+  const double error_y_body = -sin_yaw * error_x_world + cos_yaw * error_y_world;
+  const double distance = std::hypot(error_x_world, error_y_world);
 
   if (publish_debug_) {
     PublishDebug(error_x_body, error_y_body, error_yaw, distance);
@@ -264,10 +322,18 @@ void PidGoalController::ControlLoop() {
   if (distance <= pos_tolerance_ && std::fabs(error_yaw) <= yaw_tolerance_) {
     {
       std::lock_guard<std::mutex> lock(mtx_);
+
+      if (!have_goal_ || goal_generation != goal_generation_) {
+        return;
+      }
+
+      have_goal_ = false;
+      ++goal_generation_;
       ResetPid();
+      PublishStop();
     }
 
-    PublishStop();
+    RCLCPP_INFO(get_logger(), "Goal reached. Published zero Twist.");
     return;
   }
 
@@ -275,6 +341,10 @@ void PidGoalController::ControlLoop() {
 
   {
     std::lock_guard<std::mutex> lock(mtx_);
+
+    if (!have_goal_ || goal_generation != goal_generation_) {
+      return;
+    }
 
     if (reset_pid) {
       ResetPid();
@@ -306,9 +376,10 @@ void PidGoalController::ControlLoop() {
       pid_yaw_.Reset();
       cmd.angular.z = 0.0;
     }
-  }
 
-  cmd_pub_->publish(cmd);
+    // Keep publication ordered with goal invalidation in a multi-threaded executor.
+    cmd_pub_->publish(cmd);
+  }
 }
 
 }  // namespace pid_goal_controller

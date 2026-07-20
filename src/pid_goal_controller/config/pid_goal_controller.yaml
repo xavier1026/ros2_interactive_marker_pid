@@ -12,18 +12,19 @@ pid_goal_controller:
     ki_yaw: 0.0
     kd_yaw: 0.08
 
-    max_v: 0.4
-    max_w: 1.0
+    max_v: 0.10
+    max_w: 0.15
 
-    pos_tolerance: 0.03
-    yaw_tolerance: 0.05
+    pos_tolerance: 0.10
+    yaw_tolerance: 0.10
 
     control_frequency: 30.0
     transform_timeout: 0.1
     publish_debug: true
 
-    goal_topic: goal_pose
-    base_frame: base_footprint
-    cmd_vel_topic: cmd_vel
-    error_topic: pid_error
-    distance_topic: pid_distance
+    goal_topic: /goal_pose
+    global_frame: map
+    base_frame: base_link
+    cmd_vel_topic: /cmd_vel
+    error_topic: /pid_error
+    distance_topic: /pid_distance

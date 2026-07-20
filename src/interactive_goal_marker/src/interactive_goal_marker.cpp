@@ -7,9 +7,9 @@
 namespace interactive_goal_marker {
 namespace {
 
-constexpr char kDefaultFrameId[] = "odom";
+constexpr char kDefaultFrameId[] = "map";
 constexpr char kDefaultServerName[] = "goal_marker";
-constexpr char kDefaultGoalTopic[] = "goal_pose";
+constexpr char kDefaultGoalTopic[] = "/goal_pose";
 
 constexpr char kMarkerName[] = "target_goal";
 constexpr double kInteractiveMarkerScale = 0.45;
@@ -35,6 +35,12 @@ InteractiveGoalMarker::InteractiveGoalMarker() : Node("interactive_goal_marker")
   declare_parameter<std::string>("goal_topic", kDefaultGoalTopic);
 
   frame_id_ = get_parameter("frame_id").as_string();
+  if (frame_id_ != kDefaultFrameId) {
+    RCLCPP_WARN(get_logger(),
+                "frame_id='%s' is not supported; using the required global frame '%s'.",
+                frame_id_.c_str(), kDefaultFrameId);
+    frame_id_ = kDefaultFrameId;
+  }
   server_name_ = get_parameter("server_name").as_string();
   goal_topic_ = get_parameter("goal_topic").as_string();
 
@@ -48,9 +54,9 @@ InteractiveGoalMarker::InteractiveGoalMarker() : Node("interactive_goal_marker")
 
   RCLCPP_INFO(get_logger(), "interactive_goal_marker started.");
   RCLCPP_INFO(get_logger(), "RViz namespace: %s", server_name_.c_str());
-  RCLCPP_INFO(get_logger(), "Drag the marker in RViz to continuously update %s.",
+  RCLCPP_INFO(get_logger(), "The goal is published once on %s when the mouse button is released.",
               goal_topic_.c_str());
-  RCLCPP_INFO(get_logger(), "This node only publishes %s. It does not publish cmd_vel.",
+  RCLCPP_INFO(get_logger(), "This node only publishes %s. It does not publish /cmd_vel.",
               goal_topic_.c_str());
 }
 
@@ -219,7 +225,9 @@ void InteractiveGoalMarker::ProcessFeedback(
   server_->setPose(feedback->marker_name, pose);
   server_->applyChanges();
 
-  PublishGoal(pose);
+  if (feedback->event_type == visualization_msgs::msg::InteractiveMarkerFeedback::MOUSE_UP) {
+    PublishGoal(pose);
+  }
 }
 
 }  // namespace interactive_goal_marker

@@ -1,0 +1,17 @@
+g1_twist_bridge:
+  ros__parameters:
+    cmd_vel_topic: /cmd_vel
+    request_topic: /api/sport/request
+    response_topic: /api/sport/response
+
+    armed: false
+
+    max_vx: 0.10
+    max_vy: 0.05
+    max_wz: 0.15
+
+    deadband: 0.001
+
+    send_frequency: 10.0
+    command_duration: 0.20
+    command_timeout: 0.40

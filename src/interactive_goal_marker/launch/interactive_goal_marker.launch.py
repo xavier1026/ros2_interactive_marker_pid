@@ -15,14 +15,14 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "use_sim_time", default_value="false", description="Use simulation time"
             ),
-            DeclareLaunchArgument("frame_id", default_value="odom", description="Goal frame ID"),
+            DeclareLaunchArgument("frame_id", default_value="map", description="Goal frame ID"),
             DeclareLaunchArgument(
                 "server_name",
                 default_value="goal_marker",
                 description="Interactive Marker Server name",
             ),
             DeclareLaunchArgument(
-                "goal_topic", default_value="goal_pose", description="Published goal topic"
+                "goal_topic", default_value="/goal_pose", description="Published goal topic"
             ),
             Node(
                 package="interactive_goal_marker",

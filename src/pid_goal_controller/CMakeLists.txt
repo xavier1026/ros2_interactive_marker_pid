@@ -7,7 +7,6 @@ endif()
 
 find_package(ament_cmake REQUIRED)
 find_package(geometry_msgs REQUIRED)
-find_package(nav_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(tf2 REQUIRED)
@@ -27,7 +26,6 @@ target_include_directories(pid_goal_controller PUBLIC
 
 ament_target_dependencies(pid_goal_controller
   geometry_msgs
-  nav_msgs
   rclcpp
   std_msgs
   tf2_geometry_msgs
